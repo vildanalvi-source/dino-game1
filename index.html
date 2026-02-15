@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>Dino Tap (iPad Landscape)</title>
+  <style>
+    html, body {
+      margin: 0;
+      height: 100%;
+      overflow: hidden;
+      background: #f6f7fb;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      touch-action: none; /* ключевое для iPad */
+    }
+    #hud {
+      position: fixed;
+      left: calc(14px + env(safe-area-inset-left));
+      top: calc(14px + env(safe-area-inset-top));
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial;
+      font-size: 22px;
+      background: rgba(255,255,255,0.86);
+      padding: 10px 14px;
+      border-radius: 16px;
+      box-shadow: 0 8px 22px rgba(0,0,0,0.10);
+      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px);
+    }
+    #hint {
+      position: fixed;
+      right: calc(14px + env(safe-area-inset-right));
+      top: calc(14px + env(safe-area-inset-top));
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial;
+      font-size: 16px;
+      background: rgba(255,255,255,0.75);
+      padding: 8px 12px;
+      border-radius: 14px;
+      box-shadow: 0 8px 22px rgba(0,0,0,0.08);
+    }
+  </style>
+</head>
+<body>
+  <div id="hud">⭐ <span id="score">0</span></div>
+  <div id="hint">Тапай динозавриков!</div>
+  <canvas id="c"></canvas>
+
+  <script>
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+    const scoreEl = document.getElementById('score');
+    const hintEl = document.getElementById('hint');
+
+    // --- Retina resize ---
+    function resize() {
+      const dpr = Math.max(1, Math.floor(window.devicePixelRatio || 1));
+      canvas.width = Math.floor(innerWidth * dpr);
+      canvas.height = Math.floor(innerHeight * dpr);
+      canvas.style.width = innerWidth + 'px';
+      canvas.style.height = innerHeight + 'px';
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // --- Simple WebAudio (unlocked on first tap) ---
+    let audioCtx = null;
+    function ensureAudio() {
+      if (audioCtx) return;
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    function beep({ freq=660, dur=0.08, type='sine', gain=0.06 } = {}) {
+      if (!audioCtx) return;
+      const t0 = audioCtx.currentTime;
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = type;
+      o.frequency.setValueAtTime(freq, t0);
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(gain, t0 + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      o.connect(g).connect(audioCtx.destination);
+      o.start(t0);
+      o.stop(t0 + dur + 0.02);
+    }
+    function cheer() {
+      // маленькая “мелодия”
+      beep({ freq: 740, dur: 0.07, type:'triangle', gain: 0.07 });
+      setTimeout(() => beep({ freq: 880, dur: 0.07, type:'triangle', gain: 0.07 }), 90);
+      setTimeout(() => beep({ freq: 990, dur: 0.09, type:'triangle', gain: 0.06 }), 180);
+    }
+
+    // --- Game state ---
+    const dinos = [];
+    const pops = []; // частички "конфетти"
+    let score = 0;
+
+    function rand(min, max) { return Math.random() * (max - min) + min; }
+    function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+    function spawnDino() {
+      // в ландскейпе делаем чуть больше целей
+      const r = rand(42, 62);
+      dinos.push({
+        x: rand(r + 40, innerWidth - r - 40),
+        y: innerHeight + r + 30,
+        r,
+        vy: rand(-2.2, -1.2),
+        wobble: rand(0, Math.PI * 2),
+        hue: rand(95, 145),
+        hit: false
+      });
+      while (dinos.length > 10) dinos.shift();
+    }
+
+    function spawnPop(x, y) {
+      for (let i = 0; i < 16; i++) {
+        pops.push({
+          x, y,
+          vx: rand(-2.2, 2.2),
+          vy: rand(-2.8, -0.6),
+          life: rand(18, 28)
+        });
+      }
+    }
+
+    function drawDino(d) {
+      ctx.save();
+      ctx.translate(d.x, d.y);
+
+      // тень
+      ctx.globalAlpha = 0.15;
+      ctx.beginPath();
+      ctx.ellipse(0, d.r*0.85, d.r*0.7, d.r*0.25, 0, 0, Math.PI*2);
+      ctx.fillStyle = '#000';
+      ctx.fill();
+      ctx.globalAlpha = 1;
+
+      // тело
+      ctx.beginPath();
+      ctx.arc(0, 0, d.r, 0, Math.PI * 2);
+      ctx.fillStyle = d.hit ? `hsla(${d.hue},60%,60%,0.35)` : `hsla(${d.hue},60%,55%,0.95)`;
+      ctx.fill();
+
+      // пузико
+      ctx.beginPath();
+      ctx.ellipse(d.r*0.1, d.r*0.2, d.r*0.55, d.r*0.45, 0, 0, Math.PI*2);
+      ctx.fillStyle = 'rgba(255,255,255,0.22)';
+      ctx.fill();
+
+      // глаз
+      ctx.beginPath();
+      ctx.arc(d.r * 0.25, -d.r * 0.18, d.r * 0.13, 0, Math.PI * 2);
+      ctx.fillStyle = '#1b1b1b';
+      ctx.fill();
+
+      // улыбка
+      ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+      ctx.lineWidth = Math.max(3, d.r*0.06);
+      ctx.beginPath();
+      ctx.arc(d.r*0.12, d.r*0.02, d.r*0.28, 0.15*Math.PI, 0.85*Math.PI);
+      ctx.stroke();
+
+      // гребень
+      ctx.fillStyle = 'rgba(255,150,120,0.95)';
+      for (let i = -2; i <= 2; i++) {
+        const px = i * d.r * 0.22;
+        ctx.beginPath();
+        ctx.moveTo(px, -d.r * 0.85);
+        ctx.lineTo(px + d.r*0.11, -d.r * 1.12);
+        ctx.lineTo(px + d.r*0.22, -d.r * 0.85);
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      ctx.restore();
+    }
+
+    function drawBackground() {
+      ctx.fillStyle = '#f6f7fb';
+      ctx.fillRect(0, 0, innerWidth, innerHeight);
+
+      // “пол”
+      ctx.fillStyle = 'rgba(120,200,160,0.20)';
+      ctx.fillRect(0, innerHeight*0.82, innerWidth, innerHeight*0.18);
+
+      // облака
+      ctx.globalAlpha = 0.16;
+      ctx.fillStyle = '#6aa8ff';
+      const baseY = innerHeight * 0.15;
+      for (let i = 0; i < 5; i++) {
+        const x = 120 + i * (innerWidth / 5);
+        ctx.beginPath();
+        ctx.ellipse(x, baseY + (i%2)*22, 110, 46, 0, 0, Math.PI*2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    function update() {
+      drawBackground();
+
+      // динозавры
+      for (const d of dinos) {
+        d.wobble += 0.03;
+        d.x += Math.sin(d.wobble) * 0.35;
+        d.y += d.vy;
+        drawDino(d);
+      }
+
+      // конфетти
+      for (let i = pops.length - 1; i >= 0; i--) {
+        const p = pops[i];
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vy += 0.12; // гравитация
+        p.life -= 1;
+
+        ctx.globalAlpha = clamp(p.life / 28, 0, 1);
+        ctx.fillStyle = 'rgba(255,180,80,1)';
+        ctx.fillRect(p.x, p.y, 6, 6);
+
+        if (p.life <= 0) pops.splice(i, 1);
+      }
+      ctx.globalAlpha = 1;
+
+      // убрать ушедших
+      for (let i = dinos.length - 1; i >= 0; i--) {
+        if (dinos[i].y < -180) dinos.splice(i, 1);
+      }
+
+      requestAnimationFrame(update);
+    }
+    update();
+
+    // немного чаще в ландскейпе
+    setInterval(spawnDino, 750);
+    spawnDino(); spawnDino();
+
+    function pointerPos(e) {
+      const rect = canvas.getBoundingClientRect();
+      return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    }
+
+    function hitTest(p) {
+      for (let i = dinos.length - 1; i >= 0; i--) {
+        const d = dinos[i];
+        const dx = p.x - d.x, dy = p.y - d.y;
+        if (dx*dx + dy*dy <= d.r*d.r) {
+          if (!d.hit) {
+            d.hit = true;
+            score++;
+            scoreEl.textContent = score;
+            spawnPop(d.x, d.y);
+            cheer();
+            hintEl.style.opacity = '0';
+            setTimeout(() => { hintEl.style.opacity = '1'; }, 800);
+
+            // убрать быстро
+            setTimeout(() => {
+              const idx = dinos.indexOf(d);
+              if (idx >= 0) dinos.splice(idx, 1);
+            }, 120);
+          }
+          return;
+        }
+      }
+    }
+
+    canvas.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      ensureAudio();
+      // иногда на iOS аудио контекст "suspended"
+      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(()=>{});
+      hitTest(pointerPos(e));
+    }, { passive: false });
+
+    // анти-двойной-тап зум (частично)
+    let lastTouchEnd = 0;
+    document.addEventListener('touchend', (e) => {
+      const now = Date.now();
+      if (now - lastTouchEnd <= 300) e.preventDefault();
+      lastTouchEnd = now;
+    }, { passive: false });
+
+    // Подсказка при портретной ориентации
+    function orientationHint() {
+      if (innerWidth < innerHeight) {
+        hintEl.textContent = 'Поверни iPad в альбом 🙂';
+        hintEl.style.opacity = '1';
+      } else {
+        hintEl.textContent = 'Тапай динозавриков!';
+      }
+    }
+    window.addEventListener('resize', orientationHint);
+    orientationHint();
+  </script>
+</body>
+</html>
